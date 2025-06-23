@@ -1,0 +1,196 @@
+import numpy as np
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+
+# Физиологические константы
+Cm = 1.0      # мкФ/см^2 - 
+R = 8314.0       #   [Дж/(кмоль·K)]
+F = 96485.0      # Постоянная Фарадея [Кл/кмоль]
+T = 310.0        # Температура [K]
+
+L_cell = 100  #  мкм - длина клетки
+L_gap = 0.008  #  мкм - длина щелевого контакта
+
+# Внеклеточные концентрации [ммоль/л]
+Na_o = 140.0
+K_o = 5.4
+Ca_o = 1.8
+
+# Начальные внутриклеточные концентрации [ммоль/л]
+Na_i = 18.0
+K_i = 145.0
+Ca_i = 0.0002
+
+# Проводимоти ионных токов
+
+gNa = 23.0    # мСм/см^2
+gK = 0.282 * np.sqrt(K_o / 5.4)   # мСм/см^2
+gK1 = 0.6047 * np.sqrt(K_o / 5.4) # мСм/см^2
+gKp = 0.0183  # мСм/см^2
+gCaL = 0.009 # мСм/см^2
+G_gap = 1.0  # Проводимость щелевого контакта
+
+#Потенциалы ионных токов
+
+ENa = (R * T / F) * np.log(Na_o / Na_i)
+EK = (R * T / F) * np.log(K_o / K_i)
+ECa = (R * T / (2 * F)) * np.log(Ca_o / Ca_i)
+
+# Уравнения воротных переменных
+def alpha_m(V): return 0.32 * (V + 47.13) / (1 - np.exp(-0.1 * (V + 47.13)))
+def beta_m(V): return 0.08 * np.exp(-V / 11)
+def alpha_h(V): return 0.135 * np.exp(-(V + 80) / 6.8)
+def beta_h(V): return 3.56 * np.exp(0.079 * V) + 310000 * np.exp(0.35 * V)
+def alpha_j(V): return ((-127140 * np.exp(0.2444 * V) - 3.474e-5 * np.exp(-0.04391 * V)) * (V + 37.78)) / (1 + np.exp(0.311 * (V + 79.23)))
+def beta_j(V): return 0.1212 * np.exp(-0.01052 * V) / (1 + np.exp(-0.1378 * (V + 40.14)))
+def alpha_d(V): return 0.095 * np.exp(-0.01 * (V - 5)) / (1 + np.exp(-0.072 * (V - 5)))
+def beta_d(V): return 0.07 * np.exp(-0.017 * (V + 44)) / (1 + np.exp(0.05 * (V + 44)))
+def alpha_f(V): return 0.012 * np.exp(-0.008 * (V + 28)) / (1 + np.exp(0.15 * (V + 28)))
+def beta_f(V): return 0.0065 * np.exp(-0.02 * (V + 30)) / (1 + np.exp(-0.2 * (V + 30)))
+def alpha_X(V): return 0.0005 * np.exp(0.083 * (V + 50)) / (1 + np.exp(0.057 * (V + 50)))
+def beta_X(V): return 0.0013 * np.exp(-0.06 * (V + 20)) / (1 + np.exp(-0.04 * (V + 20)))
+
+def I_stim(t):
+    if 0 < t < 1.5: # начало и конец воздействия тока стимула
+        return 80.0   #амплитуда стимула мкА/см^2
+    return 0.0
+
+# Основная система ОДУ для двух клеток
+def lr91_2cell_rhs(t, y):
+    V1, m1, h1, j1, d1, f1, X1, V2, m2, h2, j2, d2, f2, X2 = y
+
+    def cell_rhs(V, m, h, j, d, f, X, stim):
+        am, bm = alpha_m(V), beta_m(V)
+        ah, bh = alpha_h(V), beta_h(V)
+        aj, bj = alpha_j(V), beta_j(V)
+        ad, bd = alpha_d(V), beta_d(V)
+        af, bf = alpha_f(V), beta_f(V)
+        aX, bX = alpha_X(V), beta_X(V)
+
+        dm = am * (1 - m) - bm * m
+        dh = ah * (1 - h) - bh * h
+        dj = aj * (1 - j) - bj * j
+        dd = ad * (1 - d) - bd * d
+        df = af * (1 - f) - bf * f
+        dX = aX * (1 - X) - bX * X
+
+        INa = gNa * (m**3) * h * j * (V - ENa)
+        ICaL = gCaL * d * f * (V - ECa)
+        IK = gK * X**2 * (V - EK)
+        IK1 = gK1 * (V - EK) / (1 + np.exp(1.31 * (V - EK - 12)))
+        Kp = 1 / (1 + np.exp((7.488 - V) / 5.98))
+        IKp = gKp * Kp * (V - EK)
+
+        Iion = INa + ICaL + IK + IK1 + IKp
+        dV = -(Iion - stim) / Cm
+
+        return dV, dm, dh, dj, dd, df, dX
+
+    Igap = G_gap * (V1 - V2) # ток щелевого контакта
+
+    dV1, dm1, dh1, dj1, dd1, df1, dX1 = cell_rhs(V1, m1, h1, j1, d1, f1, X1, I_stim(t))
+    dV2, dm2, dh2, dj2, dd2, df2, dX2 = cell_rhs(V2, m2, h2, j2, d2, f2, X2, Igap)
+
+    return [dV1, dm1, dh1, dj1, dd1, df1, dX1,
+            dV2, dm2, dh2, dj2, dd2, df2, dX2]
+
+# Начальные условия для двух клеток: напряжения и воротных переменных m, h, j, d, f, X
+V0 = -85.0
+y0_2cell = [V0, 0.0, 0.75, 0.75, 0.0, 1.0, 0.0,
+            V0, 0.0, 0.75, 0.75, 0.0, 1.0, 0.0]
+
+# Время симуляции
+t_span = (0, 400)
+t_eval = np.linspace(*t_span, 4000) # количество точек в массиве
+
+# Решение
+sol_2cell = solve_ivp(lr91_2cell_rhs, t_span, y0_2cell, method='BDF', t_eval=t_eval)
+
+# Получение данных
+t = sol_2cell.t
+V1 = sol_2cell.y[0]  # Потенциал клетки 1
+V2 = sol_2cell.y[7]  # Потенциал клетки 2
+
+# Функция для анализа параметров
+def analyze_AP(t, V, cell_name):
+    # Находим пики потенциалов действия
+    peaks, _ = find_peaks(V, height=0)
+    if len(peaks) == 0:
+        print(f"Для {cell_name} не найдены потенциалы действия")
+        return None
+
+    # Берем первый потенциал действия
+    peak_idx = peaks[0]
+    peak_voltage = V[peak_idx]
+
+    # Находим точку начала реполяризации 
+    dvdt = np.diff(V) / np.diff(t)
+    repol_start = peak_idx + np.where(dvdt[peak_idx:] < 0)[0][0]
+
+    # Рассчитываем уровень 90% реполяризации
+    resting_potential = V0
+    repol_level = peak_voltage - 0.9 * (peak_voltage - resting_potential)
+
+    # Находим точку пересечения уровня 90% реполяризации
+    crossing_points = np.where(V[repol_start:] <= repol_level)[0]
+    if len(crossing_points) == 0:
+        apd90 = np.nan
+    else:
+        apd90 = t[repol_start + crossing_points[0]] - t[repol_start]
+
+    # Максимальная скорость деполяризации (Vmax)
+    vmax = np.max(dvdt)
+
+    return {
+        'peak_voltage': peak_voltage,
+        'vmax': vmax,
+        'apd90': apd90,
+        'repol_start_time': t[repol_start]
+    }
+
+# Анализируем параметры для обеих клеток
+params_cell1 = analyze_AP(t, V1, "Клетки 1")
+params_cell2 = analyze_AP(t, V2, "Клетки 2")
+
+# Рассчитываем задержку передачи между клетками
+if params_cell1 and params_cell2:
+    delay = params_cell2['repol_start_time'] - params_cell1['repol_start_time']
+else:
+    delay = np.nan
+
+# Расчет скорости проводимости
+
+distance = (L_cell + L_gap) * 10e-4  # Расстояние между центрами клеток
+
+if not np.isnan(delay):
+    conduction_velocity = distance / (delay * 1e-3)  # переводим мс -> с
+else:
+    conduction_velocity = np.nan
+
+# Выводим результаты
+print("\nРезультаты анализа:")
+print(f"Клетка 1:")
+print(f"  - Пиковый потенциал: {params_cell1['peak_voltage']:.1f} мВ")
+print(f"  - Vmax: {params_cell1['vmax']:.1f} В/с")
+print(f"  - APD90: {params_cell1['apd90']:.1f} мс")
+
+print(f"\nКлетка 2:")
+print(f"  - Пиковый потенциал: {params_cell2['peak_voltage']:.1f} мВ")
+print(f"  - Vmax: {params_cell2['vmax']:.1f} В/с")
+print(f"  - APD90: {params_cell2['apd90']:.1f} мс")
+
+print(f"\nЗадержка передачи между клетками: {delay:.2f} мс")
+print(f"\nСкорость проведения: {conduction_velocity:.2f} см/с")
+
+# Визуализация с аннотациями
+plt.figure(figsize=(14, 7))
+plt.plot(t, V1, label="Клетка 1 (стимулируемая)")
+plt.plot(t, V2, label="Клетка 2")
+
+plt.title("Модель распространение возбуждения")
+plt.xlabel("Время (мс)")
+plt.ylabel("Мембранный потенциал (мВ)")
+plt.legend()
+plt.grid(True)
+plt.show()
